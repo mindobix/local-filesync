@@ -1,0 +1,44 @@
+appId: com.local-filesync.app
+productName: local-filesync
+
+directories:
+  buildResources: resources
+  output: dist
+
+files:
+  - out/**/*
+  - "!**/.vscode/*"
+  - "!src/*"
+  - "!electron.vite.config.*"
+  - "!tsconfig*.json"
+
+asarUnpack:
+  - resources/**
+  - "**/*.node"
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+
+nsis:
+  artifactName: ${name}-${version}-setup.${ext}
+  shortcutName: ${productName}
+  createDesktopShortcut: always
+
+mac:
+  target:
+    - target: dmg
+      arch: [arm64]
+  notarize: false
+
+dmg:
+  artifactName: ${name}-${version}-${arch}.${ext}
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+
+appImage:
+  artifactName: ${name}-${version}.${ext}
