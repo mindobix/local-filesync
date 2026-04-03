@@ -1,5 +1,6 @@
 import dgram from 'dgram'
 import { EventEmitter } from 'events'
+import os from 'os'
 
 const DISCOVERY_PORT = 9877
 const BROADCAST_INTERVAL = 5000
@@ -53,11 +54,29 @@ export function startDiscovery(
     announce()
   })
 
+  const getBroadcastAddresses = (): string[] => {
+    const addrs: string[] = []
+    for (const iface of Object.values(os.networkInterfaces())) {
+      if (!iface) continue
+      for (const addr of iface) {
+        if (addr.family === 'IPv4' && !addr.internal) {
+          const ip = addr.address.split('.').map(Number)
+          const mask = addr.netmask.split('.').map(Number)
+          const broadcast = ip.map((b, i) => (b | (~mask[i] & 0xff)) & 0xff).join('.')
+          addrs.push(broadcast)
+        }
+      }
+    }
+    return addrs.length > 0 ? addrs : ['255.255.255.255']
+  }
+
   const announce = () => {
     const payload = Buffer.from(
       JSON.stringify({ type: 'filesync-hello', deviceId, deviceName, syncPort })
     )
-    socket?.send(payload, 0, payload.length, DISCOVERY_PORT, '255.255.255.255')
+    for (const bcast of getBroadcastAddresses()) {
+      socket?.send(payload, 0, payload.length, DISCOVERY_PORT, bcast)
+    }
   }
 
   broadcastInterval = setInterval(announce, BROADCAST_INTERVAL)
