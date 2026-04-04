@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 interface ConnectedPeer {
   deviceId: string
@@ -19,12 +19,23 @@ interface SyncStatus {
   discoveredPeers: DiscoveredPeer[]
 }
 
-function timeAgo(ts: number): string {
-  const s = Math.floor((Date.now() - ts) / 1000)
+// Peers older than this are purged by the main process
+const STALE_MS = 30_000
+
+function timeAgo(ts: number, now: number): string {
+  const s = Math.floor((now - ts) / 1000)
   if (s < 10) return 'just now'
   if (s < 60) return `${s}s ago`
   if (s < 3600) return `${Math.floor(s / 60)}m ago`
   return `${Math.floor(s / 3600)}h ago`
+}
+
+// Green → yellow → red as the peer approaches the 30s stale cutoff
+function freshnessColor(lastSeen: number, now: number): string {
+  const age = now - lastSeen
+  if (age < STALE_MS * 0.4) return 'text-green-400'   // <12s
+  if (age < STALE_MS * 0.75) return 'text-yellow-400' // 12–22s
+  return 'text-red-400'                                // 22–30s
 }
 
 export default function Peers() {
@@ -36,9 +47,16 @@ export default function Peers() {
   const [manualAddress, setManualAddress] = useState('')
   const [manualPort, setManualPort] = useState('9876')
   const [manualStatus, setManualStatus] = useState('')
+  const [now, setNow] = useState(Date.now())
+  // Keep a stable ref so the status ticker doesn't re-create on each render
+  const refreshRef = useRef<() => void>(() => {})
 
   const refresh = () =>
     window.api.getSyncStatus().then(setStatus).catch(() => {})
+
+  useEffect(() => {
+    refreshRef.current = refresh
+  })
 
   useEffect(() => {
     refresh()
@@ -50,12 +68,17 @@ export default function Peers() {
         refresh()
       }
     })
-    const interval = setInterval(refresh, 5000)
+
+    // Fetch fresh peer data every 8s
+    const statusInterval = setInterval(() => refreshRef.current(), 8000)
+    // Tick every second so "last seen" text and freshness colours update live
+    const clockInterval = setInterval(() => setNow(Date.now()), 1000)
 
     return () => {
       removePeerUpdate()
       removeSyncEvent()
-      clearInterval(interval)
+      clearInterval(statusInterval)
+      clearInterval(clockInterval)
     }
   }, [])
 
@@ -173,8 +196,8 @@ export default function Peers() {
                     >
                       {isConnected ? 'Connected' : 'Discovered'}
                     </span>
-                    <p className="text-xs text-slate-500 mt-0.5">
-                      {timeAgo(peer.lastSeen)}
+                    <p className={`text-xs mt-0.5 tabular-nums ${freshnessColor(peer.lastSeen, now)}`}>
+                      {timeAgo(peer.lastSeen, now)}
                     </p>
                   </div>
                 </div>
