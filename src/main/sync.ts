@@ -3,6 +3,7 @@ import fs from 'fs'
 import path from 'path'
 import { EventEmitter } from 'events'
 import { addSyncEvent, getSetting } from './db'
+import { markSyncWrite } from './watcher'
 
 export const syncEvents = new EventEmitter()
 
@@ -85,7 +86,6 @@ async function handleMessage(
   switch (msg.type) {
     case 'hello': {
       const peerId = msg.deviceId as string
-      // If already connected via another socket, close the duplicate
       const existing = connectedPeers.get(peerId)
       if (existing && existing.ws !== ws) {
         console.log(`[Sync] duplicate connection from ${msg.deviceName}, closing old socket`)
@@ -124,7 +124,9 @@ async function handleMessage(
 
       for (const rf of remoteFiles) {
         const mine = myFileMap.get(rf.path)
-        if (!mine || mine.mtime < rf.mtime) {
+        // Only request if remote is strictly newer (use 1000ms tolerance for
+        // filesystem mtime precision differences between platforms)
+        if (!mine || rf.mtime - mine.mtime > 1000) {
           sendJSON(ws, { type: 'request-file', path: rf.path })
         }
       }
@@ -157,17 +159,27 @@ async function handleMessage(
       const rel = safeRelPath(watchFolder, msg.path as string)
       if (!rel) break
       const filePath = path.join(watchFolder, rel)
+      const remoteMtime = msg.mtime as number
+
+      // Skip if our local copy is already up-to-date (within 1s tolerance)
+      try {
+        const existing = fs.statSync(filePath)
+        if (Math.abs(existing.mtimeMs - remoteMtime) <= 1000) break
+      } catch {
+        // file doesn't exist yet — proceed to write
+      }
 
       try {
+        // Tell the watcher to ignore this write so it doesn't re-broadcast
+        markSyncWrite(filePath)
+
         fs.mkdirSync(path.dirname(filePath), { recursive: true })
         const buf = Buffer.from(msg.data as string, 'base64')
         fs.writeFileSync(filePath, buf)
-        const mtimeSec = (msg.mtime as number) / 1000
+        const mtimeSec = remoteMtime / 1000
         fs.utimesSync(filePath, mtimeSec, mtimeSec)
 
-        const sender = Array.from(connectedPeers.values()).find(
-          (p) => p.ws === ws
-        )
+        const sender = Array.from(connectedPeers.values()).find((p) => p.ws === ws)
         addSyncEvent(rel, 'received', sender?.deviceId, sender?.deviceName)
         syncEvents.emit('file-received', rel, sender?.deviceName)
       } catch {
@@ -184,10 +196,10 @@ async function handleMessage(
 
       try {
         if (fs.existsSync(filePath)) {
+          // Tell the watcher to ignore this deletion so it doesn't re-broadcast
+          markSyncWrite(filePath)
           fs.unlinkSync(filePath)
-          const sender = Array.from(connectedPeers.values()).find(
-            (p) => p.ws === ws
-          )
+          const sender = Array.from(connectedPeers.values()).find((p) => p.ws === ws)
           addSyncEvent(rel, 'deleted', sender?.deviceId, sender?.deviceName)
           syncEvents.emit('file-deleted', rel)
         }
@@ -211,7 +223,6 @@ export function startSyncServer(port: number): void {
     let peer: ConnectedPeer | null = null
     console.log(`[Sync] inbound connection from ${address}`)
 
-    // Send our hello first
     sendJSON(ws, {
       type: 'hello',
       deviceId: myDeviceId,
@@ -231,7 +242,6 @@ export function startSyncServer(port: number): void {
 
     ws.on('close', () => {
       if (peer) {
-        // Only remove if this ws is still the active one for this peer
         if (connectedPeers.get(peer.deviceId)?.ws === ws) {
           connectedPeers.delete(peer.deviceId)
           console.log(`[Sync] peer disconnected: ${peer.deviceName}`)
@@ -282,7 +292,6 @@ export function connectToPeer(
 
   ws.on('close', () => {
     connectingPeers.delete(deviceId)
-    // Only remove and notify if this ws is still the active one for this peer
     if (connectedPeers.get(deviceId)?.ws === ws) {
       connectedPeers.delete(deviceId)
       syncEvents.emit('peer-disconnected', deviceId)
