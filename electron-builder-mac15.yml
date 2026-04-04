@@ -1,0 +1,28 @@
+appId: com.local-filesync.app
+productName: local-filesync
+
+directories:
+  buildResources: resources
+  output: dist-mac15
+
+files:
+  - out/**/*
+  - "!**/.vscode/*"
+  - "!src/*"
+  - "!electron.vite.config.*"
+  - "!tsconfig*.json"
+
+asarUnpack:
+  - resources/**
+  - "**/*.node"
+
+mac:
+  target:
+    - target: dmg
+      arch: [universal]
+  notarize: false
+  extendInfo:
+    NSLocalNetworkUsageDescription: "local-filesync needs local network access to discover and sync files with nearby devices."
+
+dmg:
+  artifactName: ${name}-${version}-mac15-${arch}.${ext}

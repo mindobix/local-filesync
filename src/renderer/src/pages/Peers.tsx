@@ -48,11 +48,19 @@ export default function Peers() {
   const [manualPort, setManualPort] = useState('9876')
   const [manualStatus, setManualStatus] = useState('')
   const [now, setNow] = useState(Date.now())
+  const [refreshing, setRefreshing] = useState(false)
   // Keep a stable ref so the status ticker doesn't re-create on each render
   const refreshRef = useRef<() => void>(() => {})
 
   const refresh = () =>
     window.api.getSyncStatus().then(setStatus).catch(() => {})
+
+  const handleRefresh = () => {
+    setRefreshing(true)
+    window.api.getSyncStatus()
+      .then(setStatus)
+      .finally(() => setRefreshing(false))
+  }
 
   useEffect(() => {
     refreshRef.current = refresh
@@ -246,10 +254,11 @@ export default function Peers() {
 
       <div className="text-center">
         <button
-          onClick={refresh}
-          className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+          onClick={handleRefresh}
+          disabled={refreshing}
+          className="text-xs text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-50"
         >
-          Refresh
+          {refreshing ? 'Refreshing…' : 'Refresh'}
         </button>
       </div>
     </div>

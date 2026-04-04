@@ -1,5 +1,6 @@
 node_modules/
 dist/
+dist-mac15/
 out/
 *.log
 .DS_Store
