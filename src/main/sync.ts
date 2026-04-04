@@ -33,7 +33,8 @@ function safeRelPath(
   watchFolder: string,
   requestedPath: string
 ): string | null {
-  const rel = path.normalize(requestedPath)
+  // Normalize Windows backslashes to forward slashes before platform normalize
+  const rel = path.normalize(requestedPath.replace(/\\/g, '/'))
   if (rel.startsWith('..') || path.isAbsolute(rel)) return null
   return rel
 }
@@ -59,7 +60,7 @@ function getFileList(
           const stat = fs.statSync(full)
           if (stat.size < 100 * 1024 * 1024) {
             results.push({
-              path: path.relative(watchFolder, full),
+              path: path.relative(watchFolder, full).replace(/\\/g, '/'),
               mtime: stat.mtimeMs,
               size: stat.size
             })
