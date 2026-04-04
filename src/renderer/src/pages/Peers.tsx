@@ -70,9 +70,19 @@ export default function Peers() {
     refresh()
     window.api.getLocalIps().then(setLocalIps).catch(() => {})
 
+    // Retry on startup so peers that connect just after the UI loads are shown
+    // without waiting for the 8s poll — covers the race between renderer ready
+    // and the WebSocket hello exchange completing with cross-platform peers.
+    const startupRetry2s = setTimeout(() => refreshRef.current(), 2000)
+    const startupRetry5s = setTimeout(() => refreshRef.current(), 5000)
+
     const removePeerUpdate = window.api.onPeerUpdate(() => refresh())
     const removeSyncEvent = window.api.onSyncEvent((ev) => {
-      if (ev.type === 'peer-connected' || ev.type === 'peer-disconnected') {
+      if (
+        ev.type === 'peer-connected' ||
+        ev.type === 'peer-disconnected' ||
+        ev.type === 'file-received'
+      ) {
         refresh()
       }
     })
@@ -83,6 +93,8 @@ export default function Peers() {
     const clockInterval = setInterval(() => setNow(Date.now()), 1000)
 
     return () => {
+      clearTimeout(startupRetry2s)
+      clearTimeout(startupRetry5s)
       removePeerUpdate()
       removeSyncEvent()
       clearInterval(statusInterval)
