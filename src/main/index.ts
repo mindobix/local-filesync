@@ -126,7 +126,6 @@ function createTray(): void {
     mainWindow?.focus()
   })
 
-  // Refresh menu every 15 seconds
   setInterval(() => {
     tray?.setContextMenu(buildTrayMenu())
   }, 15_000)
@@ -157,14 +156,12 @@ async function main(): Promise<void> {
     startWatcher(watchFolder)
   }
 
-  // Discovery → connect to peers (handles reconnection after disconnect)
   discoveryEvents.on('peer', (peer) => {
     connectToPeer(peer.deviceId, peer.address, peer.syncPort)
     notifyRenderer('peer-update', peer)
     tray?.setContextMenu(buildTrayMenu())
   })
 
-  // Sync events → renderer notifications
   syncEvents.on('peer-connected', (deviceId: string, deviceName: string) => {
     addSyncEvent('', 'peer-connected', deviceId, deviceName)
     notifyRenderer('sync-event', {
@@ -228,10 +225,9 @@ app.whenReady().then(() => {
   })
 })
 
-// Keep running in tray even when all windows are closed
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
-    // on non-mac, keep alive if tray exists
+    // keep alive in tray
   }
 })
 

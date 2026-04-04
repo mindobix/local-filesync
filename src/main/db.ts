@@ -1,91 +1,105 @@
-import Database from 'better-sqlite3'
 import { app } from 'electron'
 import path from 'path'
+import fs from 'fs'
 import os from 'os'
 
-let db: Database.Database
+interface DbData {
+  settings: Record<string, string>
+  peers: PeerRow[]
+  syncEvents: SyncEventRow[]
+  nextEventId: number
+}
 
-export function initDB(): Database.Database {
-  const dbPath = path.join(app.getPath('userData'), 'filesync.db')
-  db = new Database(dbPath)
+interface PeerRow {
+  id: string
+  name: string
+  address: string
+  port: number
+  last_seen: number
+}
 
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS settings (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
+interface SyncEventRow {
+  id: number
+  file_path: string
+  event_type: string
+  peer_id: string | null
+  peer_name: string | null
+  timestamp: number
+}
 
-    CREATE TABLE IF NOT EXISTS peers (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      address TEXT,
-      port INTEGER,
-      last_seen INTEGER
-    );
+let dbPath = ''
+let data: DbData = {
+  settings: {},
+  peers: [],
+  syncEvents: [],
+  nextEventId: 1
+}
 
-    CREATE TABLE IF NOT EXISTS sync_events (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      file_path TEXT NOT NULL,
-      event_type TEXT NOT NULL,
-      peer_id TEXT,
-      peer_name TEXT,
-      timestamp INTEGER NOT NULL
-    );
-  `)
+function load(): void {
+  try {
+    const raw = fs.readFileSync(dbPath, 'utf-8')
+    data = JSON.parse(raw)
+  } catch {
+    // file doesn't exist yet or is corrupt — start fresh
+    data = { settings: {}, peers: [], syncEvents: [], nextEventId: 1 }
+  }
+}
 
-  const insertDefault = db.prepare(
-    `INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`
-  )
-  insertDefault.run('watchFolder', '')
-  insertDefault.run('deviceName', os.hostname())
-  insertDefault.run('syncPort', '9876')
-  insertDefault.run('autoLaunch', 'false')
+function save(): void {
+  try {
+    fs.writeFileSync(dbPath, JSON.stringify(data, null, 2), 'utf-8')
+  } catch (err) {
+    console.error('[db] save failed:', err)
+  }
+}
 
-  return db
+export function initDB(): void {
+  dbPath = path.join(app.getPath('userData'), 'filesync.json')
+  load()
+
+  // Set defaults if missing
+  const defaults: Record<string, string> = {
+    watchFolder: '',
+    deviceName: os.hostname(),
+    syncPort: '9876',
+    autoLaunch: 'false'
+  }
+  let changed = false
+  for (const [k, v] of Object.entries(defaults)) {
+    if (!(k in data.settings)) {
+      data.settings[k] = v
+      changed = true
+    }
+  }
+  if (changed) save()
 }
 
 export function getSetting(key: string): string | null {
-  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as
-    | { value: string }
-    | undefined
-  return row ? row.value : null
+  return data.settings[key] ?? null
 }
 
 export function setSetting(key: string, value: string): void {
-  db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(
-    key,
-    value
-  )
+  data.settings[key] = value
+  save()
 }
 
 export function getSettings(): Record<string, string> {
-  const rows = db
-    .prepare('SELECT key, value FROM settings')
-    .all() as { key: string; value: string }[]
-  return rows.reduce(
-    (acc, row) => {
-      acc[row.key] = row.value
-      return acc
-    },
-    {} as Record<string, string>
-  )
+  return { ...data.settings }
 }
 
-export function upsertPeer(
-  id: string,
-  name: string,
-  address: string,
-  port: number
-): void {
-  db.prepare(
-    `INSERT OR REPLACE INTO peers (id, name, address, port, last_seen) VALUES (?, ?, ?, ?, ?)`
-  ).run(id, name, address, port, Date.now())
+export function upsertPeer(id: string, name: string, address: string, port: number): void {
+  const idx = data.peers.findIndex((p) => p.id === id)
+  const row: PeerRow = { id, name, address, port, last_seen: Date.now() }
+  if (idx >= 0) {
+    data.peers[idx] = row
+  } else {
+    data.peers.push(row)
+  }
+  save()
 }
 
-export function getPeers(): unknown[] {
-  return db
-    .prepare('SELECT * FROM peers ORDER BY last_seen DESC')
-    .all()
+export function getPeers(): PeerRow[] {
+  return [...data.peers].sort((a, b) => b.last_seen - a.last_seen)
 }
 
 export function addSyncEvent(
@@ -94,13 +108,21 @@ export function addSyncEvent(
   peerId?: string,
   peerName?: string
 ): void {
-  db.prepare(
-    `INSERT INTO sync_events (file_path, event_type, peer_id, peer_name, timestamp) VALUES (?, ?, ?, ?, ?)`
-  ).run(filePath, eventType, peerId ?? null, peerName ?? null, Date.now())
+  data.syncEvents.unshift({
+    id: data.nextEventId++,
+    file_path: filePath,
+    event_type: eventType,
+    peer_id: peerId ?? null,
+    peer_name: peerName ?? null,
+    timestamp: Date.now()
+  })
+  // Keep only last 500 events
+  if (data.syncEvents.length > 500) {
+    data.syncEvents.length = 500
+  }
+  save()
 }
 
-export function getSyncEvents(limit = 100): unknown[] {
-  return db
-    .prepare('SELECT * FROM sync_events ORDER BY timestamp DESC LIMIT ?')
-    .all(limit)
+export function getSyncEvents(limit = 100): SyncEventRow[] {
+  return data.syncEvents.slice(0, limit)
 }

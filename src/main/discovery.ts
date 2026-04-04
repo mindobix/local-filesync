@@ -20,6 +20,22 @@ let socket: dgram.Socket | null = null
 let broadcastInterval: NodeJS.Timeout | null = null
 const knownPeers = new Map<string, PeerInfo>()
 
+function getBroadcastAddresses(): string[] {
+  const addrs: string[] = []
+  for (const iface of Object.values(os.networkInterfaces())) {
+    if (!iface) continue
+    for (const addr of iface) {
+      if (addr.family === 'IPv4' && !addr.internal) {
+        const ip = addr.address.split('.').map(Number)
+        const mask = addr.netmask.split('.').map(Number)
+        const broadcast = ip.map((b, i) => (b | (~mask[i] & 0xff)) & 0xff).join('.')
+        if (!addrs.includes(broadcast)) addrs.push(broadcast)
+      }
+    }
+  }
+  return addrs.length > 0 ? addrs : ['255.255.255.255']
+}
+
 export function startDiscovery(
   deviceId: string,
   deviceName: string,
@@ -52,45 +68,40 @@ export function startDiscovery(
     }
   })
 
-  const getBroadcastAddresses = (): string[] => {
-    const addrs: string[] = []
-    for (const iface of Object.values(os.networkInterfaces())) {
-      if (!iface) continue
-      for (const addr of iface) {
-        if (addr.family === 'IPv4' && !addr.internal) {
-          const ip = addr.address.split('.').map(Number)
-          const mask = addr.netmask.split('.').map(Number)
-          const broadcast = ip.map((b, i) => (b | (~mask[i] & 0xff)) & 0xff).join('.')
-          addrs.push(broadcast)
-        }
-      }
-    }
-    return addrs.length > 0 ? addrs : ['255.255.255.255']
-  }
-
   const announce = () => {
+    if (!socket) return
     const payload = Buffer.from(
       JSON.stringify({ type: 'filesync-hello', deviceId, deviceName, syncPort })
     )
     for (const bcast of getBroadcastAddresses()) {
-      socket?.send(payload, 0, payload.length, DISCOVERY_PORT, bcast)
+      socket.send(payload, 0, payload.length, DISCOVERY_PORT, bcast, (err) => {
+        if (err) console.error('[Discovery] send error to', bcast, ':', err.message)
+      })
     }
   }
 
-  socket.bind(DISCOVERY_PORT, () => {
-    socket?.setBroadcast(true)
+  socket.bind(DISCOVERY_PORT, '0.0.0.0', () => {
+    try {
+      socket?.setBroadcast(true)
+    } catch (err: unknown) {
+      console.error('[Discovery] setBroadcast failed:', (err as Error).message)
+    }
     const bcasts = getBroadcastAddresses()
     console.log(`[Discovery] listening on port ${DISCOVERY_PORT}, broadcasting to: ${bcasts.join(', ')}`)
     announce()
+    broadcastInterval = setInterval(announce, BROADCAST_INTERVAL)
   })
-
-  broadcastInterval = setInterval(announce, BROADCAST_INTERVAL)
 }
 
 export function stopDiscovery(): void {
-  if (broadcastInterval) clearInterval(broadcastInterval)
-  socket?.close()
-  socket = null
+  if (broadcastInterval) {
+    clearInterval(broadcastInterval)
+    broadcastInterval = null
+  }
+  if (socket) {
+    try { socket.close() } catch { /* already closed */ }
+    socket = null
+  }
 }
 
 export function getKnownPeers(): PeerInfo[] {
