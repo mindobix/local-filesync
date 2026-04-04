@@ -88,7 +88,15 @@ async function handleMessage(
       const peerId = msg.deviceId as string
       const existing = connectedPeers.get(peerId)
       if (existing && existing.ws !== ws) {
-        console.log(`[Sync] duplicate connection from ${msg.deviceName}, closing old socket`)
+        if (existing.ws.readyState === WebSocket.OPEN) {
+          // Already have a healthy connection — reject this duplicate instead of
+          // closing the working one (closing it causes a disconnect → reconnect
+          // → repeated file-list exchange → sync loop)
+          console.log(`[Sync] duplicate connection from ${msg.deviceName}, rejecting new socket`)
+          ws.close()
+          break
+        }
+        // Existing connection is dead, replace it
         existing.ws.close()
       }
       const peer: ConnectedPeer = {
@@ -161,23 +169,28 @@ async function handleMessage(
       const filePath = path.join(watchFolder, rel)
       const remoteMtime = msg.mtime as number
 
-      // Skip if our local copy is already up-to-date (within 1s tolerance)
+      // Skip if our local copy is already up-to-date (2s tolerance covers
+      // HFS+ 1-second mtime precision and cross-platform rounding)
       try {
         const existing = fs.statSync(filePath)
-        if (Math.abs(existing.mtimeMs - remoteMtime) <= 1000) break
+        if (Math.abs(existing.mtimeMs - remoteMtime) <= 2000) break
       } catch {
         // file doesn't exist yet — proceed to write
       }
 
       try {
-        // Tell the watcher to ignore this write so it doesn't re-broadcast
-        markSyncWrite(filePath)
-
         fs.mkdirSync(path.dirname(filePath), { recursive: true })
         const buf = Buffer.from(msg.data as string, 'base64')
         fs.writeFileSync(filePath, buf)
         const mtimeSec = remoteMtime / 1000
         fs.utimesSync(filePath, mtimeSec, mtimeSec)
+
+        // Read back actual mtime from disk — filesystem precision (e.g. HFS+
+        // rounds to 1s) means what we read back may differ from remoteMtime.
+        // markSyncWrite must use the real on-disk value so isSyncWrite matches.
+        let actualMtime = remoteMtime
+        try { actualMtime = fs.statSync(filePath).mtimeMs } catch { /* ignore */ }
+        markSyncWrite(filePath, actualMtime)
 
         const sender = Array.from(connectedPeers.values()).find((p) => p.ws === ws)
         addSyncEvent(rel, 'received', sender?.deviceId, sender?.deviceName)
@@ -196,8 +209,7 @@ async function handleMessage(
 
       try {
         if (fs.existsSync(filePath)) {
-          // Tell the watcher to ignore this deletion so it doesn't re-broadcast
-          markSyncWrite(filePath)
+          markSyncWrite(filePath, -1) // -1 = deletion sentinel
           fs.unlinkSync(filePath)
           const sender = Array.from(connectedPeers.values()).find((p) => p.ws === ws)
           addSyncEvent(rel, 'deleted', sender?.deviceId, sender?.deviceName)
