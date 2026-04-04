@@ -322,31 +322,33 @@ export function broadcastFileChange(
   watchFolder: string
 ): void {
   const filePath = path.join(watchFolder, relativePath)
+  const normalizedPath = relativePath.replace(/\\/g, '/')
   try {
     const data = fs.readFileSync(filePath)
     const stat = fs.statSync(filePath)
     const msg = {
       type: 'file-data',
-      path: relativePath,
+      path: normalizedPath,
       mtime: stat.mtimeMs,
       data: data.toString('base64')
     }
     for (const peer of connectedPeers.values()) {
       sendJSON(peer.ws, msg)
     }
-    addSyncEvent(relativePath, 'sent')
-    syncEvents.emit('file-sent', relativePath)
+    addSyncEvent(normalizedPath, 'sent')
+    syncEvents.emit('file-sent', normalizedPath)
   } catch {
     // file unreadable
   }
 }
 
 export function broadcastFileDeletion(relativePath: string): void {
-  const msg = { type: 'file-deleted', path: relativePath }
+  const normalizedPath = relativePath.replace(/\\/g, '/')
+  const msg = { type: 'file-deleted', path: normalizedPath }
   for (const peer of connectedPeers.values()) {
     sendJSON(peer.ws, msg)
   }
-  addSyncEvent(relativePath, 'deleted-local')
+  addSyncEvent(normalizedPath, 'deleted-local')
 }
 
 export function getConnectedPeers(): {
