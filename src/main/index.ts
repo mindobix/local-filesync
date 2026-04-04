@@ -139,8 +139,6 @@ function notifyRenderer(channel: string, ...args: unknown[]): void {
 }
 
 async function main(): Promise<void> {
-  initDB()
-
   // Ensure this device has a stable ID
   let deviceId = getSetting('deviceId')
   if (!deviceId) {
@@ -158,8 +156,6 @@ async function main(): Promise<void> {
   if (watchFolder) {
     startWatcher(watchFolder)
   }
-
-  registerIpcHandlers()
 
   // Discovery → connect to peers (handles reconnection after disconnect)
   discoveryEvents.on('peer', (peer) => {
@@ -213,6 +209,15 @@ async function main(): Promise<void> {
 }
 
 app.whenReady().then(() => {
+  // Init DB and register IPC handlers BEFORE creating the window so the
+  // renderer never hits "No handler registered" regardless of timing.
+  try {
+    initDB()
+  } catch (e) {
+    console.error('[Main] DB init failed:', e)
+  }
+  registerIpcHandlers()
+
   createWindow()
   createTray()
   main()

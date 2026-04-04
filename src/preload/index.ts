@@ -14,6 +14,11 @@ contextBridge.exposeInMainWorld('api', {
 
   getSyncStatus: () => ipcRenderer.invoke('get-sync-status'),
 
+  getLocalIps: () => ipcRenderer.invoke('get-local-ips'),
+
+  connectToPeerManual: (address: string, port: number) =>
+    ipcRenderer.invoke('connect-to-peer-manual', address, port),
+
   onSyncEvent: (callback: (event: SyncEvent) => void) => {
     const listener = (_: Electron.IpcRendererEvent, event: SyncEvent) =>
       callback(event)

@@ -1,7 +1,8 @@
 import { ipcMain, dialog, BrowserWindow, app } from 'electron'
+import os from 'os'
 import { getSettings, getSetting, setSetting, getPeers, getSyncEvents } from './db'
 import { startWatcher, stopWatcher } from './watcher'
-import { startSyncServer, stopSyncServer, getConnectedPeers } from './sync'
+import { startSyncServer, stopSyncServer, getConnectedPeers, connectToPeer } from './sync'
 import { startDiscovery, stopDiscovery, getKnownPeers } from './discovery'
 
 export function registerIpcHandlers(): void {
@@ -74,4 +75,23 @@ export function registerIpcHandlers(): void {
     connectedPeers: getConnectedPeers(),
     discoveredPeers: getKnownPeers()
   }))
+
+  ipcMain.handle('get-local-ips', () => {
+    const ips: string[] = []
+    for (const iface of Object.values(os.networkInterfaces())) {
+      if (!iface) continue
+      for (const addr of iface) {
+        if (addr.family === 'IPv4' && !addr.internal) {
+          ips.push(addr.address)
+        }
+      }
+    }
+    return ips
+  })
+
+  ipcMain.handle('connect-to-peer-manual', (_, address: string, port: number) => {
+    const manualId = `manual-${address}`
+    connectToPeer(manualId, address, port)
+    return { ok: true }
+  })
 }

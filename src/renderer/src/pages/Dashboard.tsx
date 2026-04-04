@@ -66,8 +66,8 @@ export default function Dashboard() {
 
   useEffect(() => {
     // Load initial data
-    window.api.getSyncStatus().then(setStatus)
-    window.api.getSettings().then((s) => setWatchFolder(s.watchFolder ?? ''))
+    window.api.getSyncStatus().then(setStatus).catch(() => {})
+    window.api.getSettings().then((s) => setWatchFolder(s.watchFolder ?? '')).catch(() => {})
     window.api.getEvents(50).then((evs) => {
       const mapped = (evs as Record<string, unknown>[]).map((e) => ({
         type: e.event_type as string,

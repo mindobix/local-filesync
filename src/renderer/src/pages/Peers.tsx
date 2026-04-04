@@ -32,18 +32,21 @@ export default function Peers() {
     connectedPeers: [],
     discoveredPeers: []
   })
+  const [localIps, setLocalIps] = useState<string[]>([])
+  const [manualAddress, setManualAddress] = useState('')
+  const [manualPort, setManualPort] = useState('9876')
+  const [manualStatus, setManualStatus] = useState('')
 
-  const refresh = () => window.api.getSyncStatus().then(setStatus)
+  const refresh = () =>
+    window.api.getSyncStatus().then(setStatus).catch(() => {})
 
   useEffect(() => {
     refresh()
+    window.api.getLocalIps().then(setLocalIps).catch(() => {})
 
     const removePeerUpdate = window.api.onPeerUpdate(() => refresh())
     const removeSyncEvent = window.api.onSyncEvent((ev) => {
-      if (
-        ev.type === 'peer-connected' ||
-        ev.type === 'peer-disconnected'
-      ) {
+      if (ev.type === 'peer-connected' || ev.type === 'peer-disconnected') {
         refresh()
       }
     })
@@ -58,8 +61,41 @@ export default function Peers() {
 
   const connectedIds = new Set(status.connectedPeers.map((p) => p.deviceId))
 
+  const handleManualConnect = async () => {
+    const address = manualAddress.trim()
+    const port = parseInt(manualPort, 10)
+    if (!address || isNaN(port)) {
+      setManualStatus('Enter a valid IP and port.')
+      return
+    }
+    setManualStatus('Connecting...')
+    try {
+      await window.api.connectToPeerManual(address, port)
+      setManualStatus('Connection initiated — check Connected list.')
+      setTimeout(() => refresh(), 2000)
+    } catch (e) {
+      setManualStatus('Failed: ' + String(e))
+    }
+  }
+
   return (
     <div className="h-full overflow-y-auto p-4 space-y-4">
+
+      {/* This device info */}
+      {localIps.length > 0 && (
+        <section>
+          <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+            This Device
+          </h2>
+          <div className="bg-slate-800 rounded-lg px-4 py-3">
+            <p className="text-xs text-slate-400 mb-1">Local IP{localIps.length > 1 ? 's' : ''} (share with other Mac)</p>
+            {localIps.map((ip) => (
+              <p key={ip} className="text-sm font-mono text-slate-200">{ip}</p>
+            ))}
+          </div>
+        </section>
+      )}
+
       {/* Connected peers */}
       <section>
         <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
@@ -103,7 +139,7 @@ export default function Peers() {
 
         {status.discoveredPeers.length === 0 ? (
           <div className="bg-slate-800 rounded-lg p-4 text-sm text-slate-500 text-center">
-            Scanning local network...
+            Scanning local network... (if nothing appears, use manual connect below)
           </div>
         ) : (
           <div className="space-y-2">
@@ -146,6 +182,43 @@ export default function Peers() {
             })}
           </div>
         )}
+      </section>
+
+      {/* Manual connect */}
+      <section>
+        <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
+          Manual Connect
+        </h2>
+        <div className="bg-slate-800 rounded-lg p-4 space-y-3">
+          <p className="text-xs text-slate-400">
+            If auto-discovery is blocked by your router, enter the other Mac's IP address directly.
+          </p>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              placeholder="192.168.1.x"
+              value={manualAddress}
+              onChange={(e) => setManualAddress(e.target.value)}
+              className="flex-1 bg-slate-700 text-slate-200 text-sm rounded px-3 py-1.5 outline-none focus:ring-1 focus:ring-blue-500 font-mono"
+            />
+            <input
+              type="number"
+              placeholder="9876"
+              value={manualPort}
+              onChange={(e) => setManualPort(e.target.value)}
+              className="w-20 bg-slate-700 text-slate-200 text-sm rounded px-3 py-1.5 outline-none focus:ring-1 focus:ring-blue-500 font-mono"
+            />
+            <button
+              onClick={handleManualConnect}
+              className="bg-blue-600 hover:bg-blue-500 text-white text-sm rounded px-4 py-1.5 transition-colors"
+            >
+              Connect
+            </button>
+          </div>
+          {manualStatus && (
+            <p className="text-xs text-slate-400">{manualStatus}</p>
+          )}
+        </div>
       </section>
 
       <div className="text-center">
