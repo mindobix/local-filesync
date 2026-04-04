@@ -1,7 +1,8 @@
 import { app, BrowserWindow, Tray, Menu, nativeImage, shell } from 'electron'
 import path from 'path'
+import os from 'os'
 import { v4 as uuidv4 } from 'uuid'
-import { initDB, getSetting, setSetting, addSyncEvent } from './db'
+import { initDB, getSetting, setSetting, addSyncEvent, upsertPeer, getPeers } from './db'
 import {
   startDiscovery,
   stopDiscovery,
@@ -154,17 +155,40 @@ async function main(): Promise<void> {
   startSyncServer(syncPort)
   startDiscovery(deviceId, getSetting('deviceName') ?? 'Unknown', syncPort)
 
+  // macOS 15 local network privacy can silently block incoming UDP broadcasts
+  // from non-Apple peers (e.g. Windows). As a fallback, reconnect directly to
+  // any peers seen in the last 7 days, bypassing UDP discovery entirely.
+  const darwinMajor = process.platform === 'darwin'
+    ? parseInt(os.release().split('.')[0], 10)
+    : 0
+  if (darwinMajor >= 24) {
+    const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000
+    setTimeout(() => {
+      for (const p of getPeers().filter((peer) => peer.last_seen > sevenDaysAgo)) {
+        console.log(`[mac15] reconnecting to known peer: ${p.name} (${p.address}:${p.port})`)
+        connectToPeer(p.id, p.address, p.port)
+      }
+    }, 3000)
+  }
+
   if (watchFolder) {
     startWatcher(watchFolder)
   }
 
   discoveryEvents.on('peer', (peer) => {
+    upsertPeer(peer.deviceId, peer.deviceName, peer.address, peer.syncPort)
     connectToPeer(peer.deviceId, peer.address, peer.syncPort)
     notifyRenderer('peer-update', peer)
     tray?.setContextMenu(buildTrayMenu())
   })
 
-  syncEvents.on('peer-connected', (deviceId: string, deviceName: string) => {
+  // When a peer sends their hello (inbound or outbound), persist their
+  // address + syncPort so mac15 can reconnect to them on next startup
+  // even if UDP discovery is blocked by macOS 15 local network privacy.
+  syncEvents.on('peer-connected', (deviceId: string, deviceName: string, address: string, syncPort: number | null) => {
+    if (address && syncPort) {
+      upsertPeer(deviceId, deviceName, address, syncPort)
+    }
     addSyncEvent('', 'peer-connected', deviceId, deviceName)
     notifyRenderer('sync-event', {
       type: 'peer-connected',

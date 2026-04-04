@@ -109,7 +109,9 @@ async function handleMessage(
       connectedPeers.set(peer.deviceId, peer)
       onHello?.(peer)
       console.log(`[Sync] peer connected: ${peer.deviceName} (${peer.address})`)
-      syncEvents.emit('peer-connected', peer.deviceId, peer.deviceName)
+      // Emit syncPort so the main process can persist this peer for reconnection
+      const remoteSyncPort = typeof msg.syncPort === 'number' ? msg.syncPort as number : null
+      syncEvents.emit('peer-connected', peer.deviceId, peer.deviceName, peer.address, remoteSyncPort)
       sendJSON(ws, { type: 'get-file-list' })
       break
     }
@@ -239,7 +241,8 @@ export function startSyncServer(port: number): void {
     sendJSON(ws, {
       type: 'hello',
       deviceId: myDeviceId,
-      deviceName: getSetting('deviceName') ?? 'Unknown'
+      deviceName: getSetting('deviceName') ?? 'Unknown',
+      syncPort: parseInt(getSetting('syncPort') ?? '9876', 10)
     })
 
     ws.on('message', (data) => {
@@ -290,7 +293,8 @@ export function connectToPeer(
     sendJSON(ws, {
       type: 'hello',
       deviceId: myDeviceId,
-      deviceName: getSetting('deviceName') ?? 'Unknown'
+      deviceName: getSetting('deviceName') ?? 'Unknown',
+      syncPort: parseInt(getSetting('syncPort') ?? '9876', 10)
     })
   })
 
