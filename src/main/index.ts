@@ -12,6 +12,8 @@ import {
   startSyncServer,
   stopSyncServer,
   connectToPeer,
+  requestSyncFromPeer,
+  getConnectedPeers,
   syncEvents,
   setMyDeviceId
 } from './sync'
@@ -169,7 +171,18 @@ async function main(): Promise<void> {
       deviceName,
       timestamp: Date.now()
     })
+    // Wait for the hello exchange to complete, then request their file list
+    // so we pull anything we missed while this peer was offline.
+    setTimeout(() => requestSyncFromPeer(deviceId), 1500)
   })
+
+  // Periodic catch-up sync every 5 minutes — pulls file lists from all
+  // connected peers to catch any changes missed due to network gaps.
+  setInterval(() => {
+    for (const peer of getConnectedPeers()) {
+      requestSyncFromPeer(peer.deviceId)
+    }
+  }, 5 * 60 * 1000)
 
   syncEvents.on('peer-disconnected', (deviceId: string) => {
     notifyRenderer('sync-event', {

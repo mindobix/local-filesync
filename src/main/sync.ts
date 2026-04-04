@@ -363,3 +363,16 @@ export function getConnectedPeers(): {
 export function stopSyncServer(): void {
   wss?.close()
 }
+
+/**
+ * Ask a specific peer to send us their file list so we can pull anything
+ * we're missing or that's newer on their side.
+ * Safe to call at any time — it's a pure pull request, no files are pushed.
+ */
+export function requestSyncFromPeer(deviceId: string): void {
+  const peer = connectedPeers.get(deviceId)
+  if (peer && peer.ws.readyState === WebSocket.OPEN) {
+    console.log(`[Sync] requesting file list from ${peer.deviceName} for catch-up sync`)
+    sendJSON(peer.ws, { type: 'get-file-list' })
+  }
+}
