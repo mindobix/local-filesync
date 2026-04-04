@@ -84,14 +84,22 @@ async function handleMessage(
 
   switch (msg.type) {
     case 'hello': {
+      const peerId = msg.deviceId as string
+      // If already connected via another socket, close the duplicate
+      const existing = connectedPeers.get(peerId)
+      if (existing && existing.ws !== ws) {
+        console.log(`[Sync] duplicate connection from ${msg.deviceName}, closing old socket`)
+        existing.ws.close()
+      }
       const peer: ConnectedPeer = {
         ws,
-        deviceId: msg.deviceId as string,
+        deviceId: peerId,
         deviceName: msg.deviceName as string,
         address
       }
       connectedPeers.set(peer.deviceId, peer)
       onHello?.(peer)
+      console.log(`[Sync] peer connected: ${peer.deviceName} (${peer.address})`)
       syncEvents.emit('peer-connected', peer.deviceId, peer.deviceName)
       sendJSON(ws, { type: 'get-file-list' })
       break
@@ -194,9 +202,14 @@ async function handleMessage(
 export function startSyncServer(port: number): void {
   wss = new WebSocketServer({ port })
 
+  wss.on('listening', () => {
+    console.log(`[Sync] server listening on port ${port}`)
+  })
+
   wss.on('connection', (ws, req) => {
     const address = req.socket.remoteAddress ?? 'unknown'
     let peer: ConnectedPeer | null = null
+    console.log(`[Sync] inbound connection from ${address}`)
 
     // Send our hello first
     sendJSON(ws, {
@@ -218,15 +231,23 @@ export function startSyncServer(port: number): void {
 
     ws.on('close', () => {
       if (peer) {
-        connectedPeers.delete(peer.deviceId)
-        syncEvents.emit('peer-disconnected', peer.deviceId)
+        // Only remove if this ws is still the active one for this peer
+        if (connectedPeers.get(peer.deviceId)?.ws === ws) {
+          connectedPeers.delete(peer.deviceId)
+          console.log(`[Sync] peer disconnected: ${peer.deviceName}`)
+          syncEvents.emit('peer-disconnected', peer.deviceId)
+        }
       }
     })
 
-    ws.on('error', () => {/* ignore */})
+    ws.on('error', (err) => {
+      console.error(`[Sync] inbound ws error from ${address}:`, err.message)
+    })
   })
 
-  wss.on('error', () => {/* ignore port conflicts */})
+  wss.on('error', (err) => {
+    console.error('[Sync] server error:', err.message)
+  })
 }
 
 export function connectToPeer(
@@ -237,10 +258,12 @@ export function connectToPeer(
   if (connectedPeers.has(deviceId) || connectingPeers.has(deviceId)) return
 
   connectingPeers.add(deviceId)
+  console.log(`[Sync] connecting to ${address}:${port}`)
   const ws = new WebSocket(`ws://${address}:${port}`)
 
   ws.on('open', () => {
     connectingPeers.delete(deviceId)
+    console.log(`[Sync] connected to ${address}:${port}`)
     sendJSON(ws, {
       type: 'hello',
       deviceId: myDeviceId,
@@ -259,11 +282,15 @@ export function connectToPeer(
 
   ws.on('close', () => {
     connectingPeers.delete(deviceId)
-    connectedPeers.delete(deviceId)
-    syncEvents.emit('peer-disconnected', deviceId)
+    // Only remove and notify if this ws is still the active one for this peer
+    if (connectedPeers.get(deviceId)?.ws === ws) {
+      connectedPeers.delete(deviceId)
+      syncEvents.emit('peer-disconnected', deviceId)
+    }
   })
 
-  ws.on('error', () => {
+  ws.on('error', (err) => {
+    console.error(`[Sync] connection error to ${address}:${port}:`, err.message)
     connectingPeers.delete(deviceId)
   })
 }

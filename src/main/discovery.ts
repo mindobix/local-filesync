@@ -27,7 +27,9 @@ export function startDiscovery(
 ): void {
   socket = dgram.createSocket({ type: 'udp4', reuseAddr: true })
 
-  socket.on('error', () => {/* ignore bind/send errors */})
+  socket.on('error', (err) => {
+    console.error('[Discovery] socket error:', err.message)
+  })
 
   socket.on('message', (msg, rinfo) => {
     try {
@@ -42,16 +44,12 @@ export function startDiscovery(
         }
         const isNew = !knownPeers.has(peer.deviceId)
         knownPeers.set(peer.deviceId, peer)
+        if (isNew) console.log(`[Discovery] found peer: ${peer.deviceName} (${peer.address}:${peer.syncPort})`)
         discoveryEvents.emit('peer', peer, isNew)
       }
     } catch {
       // ignore malformed packets
     }
-  })
-
-  socket.bind(DISCOVERY_PORT, () => {
-    socket?.setBroadcast(true)
-    announce()
   })
 
   const getBroadcastAddresses = (): string[] => {
@@ -78,6 +76,13 @@ export function startDiscovery(
       socket?.send(payload, 0, payload.length, DISCOVERY_PORT, bcast)
     }
   }
+
+  socket.bind(DISCOVERY_PORT, () => {
+    socket?.setBroadcast(true)
+    const bcasts = getBroadcastAddresses()
+    console.log(`[Discovery] listening on port ${DISCOVERY_PORT}, broadcasting to: ${bcasts.join(', ')}`)
+    announce()
+  })
 
   broadcastInterval = setInterval(announce, BROADCAST_INTERVAL)
 }
