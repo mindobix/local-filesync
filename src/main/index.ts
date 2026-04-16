@@ -181,9 +181,7 @@ async function main(): Promise<void> {
 
   if (watchFolder) {
     startWatcher(watchFolder)
-    if (getSetting('clipboardSync') === 'true') {
-      startClipboardSync(watchFolder)
-    }
+    startClipboardSync(watchFolder)
   }
 
   discoveryEvents.on('peer', (peer) => {

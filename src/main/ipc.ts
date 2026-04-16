@@ -24,10 +24,9 @@ export function registerIpcHandlers(): void {
         }
       }
 
-      if ('watchFolder' in settings || 'clipboardSync' in settings) {
+      if ('watchFolder' in settings) {
         const folder = getSetting('watchFolder') ?? ''
-        const enabled = getSetting('clipboardSync') === 'true'
-        if (enabled && folder) {
+        if (folder) {
           startClipboardSync(folder)
         } else {
           stopClipboardSync()
