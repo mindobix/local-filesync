@@ -71,7 +71,8 @@ export function initDB(): void {
     watchFolder: '',
     deviceName: os.hostname(),
     syncPort: '9876',
-    autoLaunch: 'false'
+    autoLaunch: 'false',
+    clipboardSync: 'false'
   }
   let changed = false
   for (const [k, v] of Object.entries(defaults)) {

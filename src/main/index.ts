@@ -20,6 +20,13 @@ import {
 } from './sync'
 import { startWatcher, stopWatcher } from './watcher'
 import { registerIpcHandlers } from './ipc'
+import {
+  startClipboardSync,
+  stopClipboardSync,
+  applyClipboardFromPeer,
+  setClipboardDeviceId,
+  type ClipboardPayload
+} from './clipboard'
 
 let mainWindow: BrowserWindow | null = null
 let tray: Tray | null = null
@@ -148,6 +155,7 @@ async function main(): Promise<void> {
     setSetting('deviceId', deviceId)
   }
   setMyDeviceId(deviceId)
+  setClipboardDeviceId(deviceId)
 
   const syncPort = parseInt(getSetting('syncPort') ?? '9876', 10)
   const watchFolder = getSetting('watchFolder') ?? ''
@@ -173,6 +181,9 @@ async function main(): Promise<void> {
 
   if (watchFolder) {
     startWatcher(watchFolder)
+    if (getSetting('clipboardSync') === 'true') {
+      startClipboardSync(watchFolder)
+    }
   }
 
   discoveryEvents.on('peer', (peer) => {
@@ -249,6 +260,10 @@ async function main(): Promise<void> {
     })
   })
 
+  syncEvents.on('clipboard-received', (payload: ClipboardPayload) => {
+    applyClipboardFromPeer(payload)
+  })
+
   syncEvents.on('peer-sync-state', (deviceId: string, deviceName: string, paused: boolean) => {
     notifyRenderer('sync-event', {
       type: 'peer-sync-state',
@@ -291,4 +306,5 @@ app.on('before-quit', () => {
   stopDiscovery()
   stopSyncServer()
   stopWatcher()
+  stopClipboardSync()
 })

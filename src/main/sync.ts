@@ -7,6 +7,16 @@ import { markSyncWrite } from './watcher'
 
 export const syncEvents = new EventEmitter()
 
+/** Wire-format filename used for clipboard sync. Dot-prefix keeps it hidden
+ *  from the user's watch folder and ensures chokidar ignores it. */
+export const CLIPBOARD_FILENAME = '.filesync-clipboard.json'
+
+/** Files at or above this size use chunked transfer instead of a single message. */
+const LARGE_FILE_THRESHOLD = 100 * 1024 * 1024 // 100 MB
+
+/** Chunk size for large-file streaming (2 MB keeps memory bounded on both ends). */
+const CHUNK_SIZE = 2 * 1024 * 1024 // 2 MB
+
 interface ConnectedPeer {
   ws: WebSocket
   deviceId: string
@@ -15,9 +25,20 @@ interface ConnectedPeer {
   paused: boolean
 }
 
+/** State tracked while receiving a large file in chunks. */
+interface LargeFileTransfer {
+  tmpPath: string      // dot-prefixed hidden temp file
+  totalChunks: number
+  receivedChunks: number
+  mtime: number
+}
+
 let wss: WebSocketServer | null = null
 const connectedPeers = new Map<string, ConnectedPeer>()
 const connectingPeers = new Set<string>()
+// Keyed by wire path. One in-progress receive per file at a time is sufficient
+// because we only request each file from one peer.
+const inProgressTransfers = new Map<string, LargeFileTransfer>()
 let myDeviceId = ''
 let syncPaused = false
 
@@ -31,11 +52,9 @@ export function isSyncPaused(): boolean {
 
 export function setSyncPaused(paused: boolean): void {
   syncPaused = paused
-  // Tell every connected peer about the new state
   for (const peer of connectedPeers.values()) {
     sendJSON(peer.ws, { type: 'sync-state', paused })
   }
-  // On resume, ask all peers for their latest file list so we catch up immediately
   if (!paused) {
     for (const peer of connectedPeers.values()) {
       sendJSON(peer.ws, { type: 'get-file-list' })
@@ -80,12 +99,17 @@ function safeRelPath(
   _watchFolder: string,
   requestedPath: string
 ): string | null {
-  // Wire paths always use forward slashes; convert to the local separator before
-  // normalizing so that path.normalize can detect traversal correctly on all OSes.
   const platformPath = requestedPath.split('/').join(path.sep)
   const rel = path.normalize(platformPath)
   if (rel.startsWith('..') || path.isAbsolute(rel)) return null
   return rel
+}
+
+/** Temp file path for a large file receive — dot-prefixed so chokidar ignores it. */
+function tmpPathFor(watchFolder: string, rel: string): string {
+  const dir = path.dirname(path.join(watchFolder, rel))
+  const base = path.basename(rel)
+  return path.join(dir, `.${base}.filesync-tmp`)
 }
 
 function getFileList(
@@ -105,17 +129,15 @@ function getFileList(
       if (entry.isDirectory()) {
         scan(full)
       } else if (entry.isFile()) {
+        if (entry.name === CLIPBOARD_FILENAME) continue
         try {
           const stat = fs.statSync(full)
-          if (stat.size < 100 * 1024 * 1024) {
-            results.push({
-              // Always use forward slashes on the wire so Windows and macOS/Linux
-              // paths compare correctly in the file-list map lookup.
-              path: toWirePath(path.relative(watchFolder, full)),
-              mtime: stat.mtimeMs,
-              size: stat.size
-            })
-          }
+          // All file sizes are included — large files use the chunked transfer path.
+          results.push({
+            path: toWirePath(path.relative(watchFolder, full)),
+            mtime: stat.mtimeMs,
+            size: stat.size
+          })
         } catch {
           // skip unreadable files
         }
@@ -125,6 +147,54 @@ function getFileList(
 
   scan(watchFolder)
   return results
+}
+
+/**
+ * Stream a single large file to one peer in 2 MB chunks.
+ * Reads the file incrementally so memory stays bounded regardless of file size.
+ */
+async function streamLargeFileToPeer(
+  ws: WebSocket,
+  wirePath: string,
+  watchFolder: string
+): Promise<void> {
+  const rel = safeRelPath(watchFolder, wirePath)
+  if (!rel) return
+  const filePath = path.join(watchFolder, rel)
+
+  let stat: fs.Stats
+  try { stat = fs.statSync(filePath) } catch { return }
+
+  const totalChunks = Math.ceil(stat.size / CHUNK_SIZE)
+  console.log(`[Sync] streaming large file to peer: ${wirePath} (${(stat.size / 1024 / 1024).toFixed(1)} MB, ${totalChunks} chunks)`)
+
+  sendJSON(ws, {
+    type: 'large-file-start',
+    path: wirePath,
+    size: stat.size,
+    mtime: stat.mtimeMs,
+    totalChunks
+  })
+
+  try {
+    const stream = fs.createReadStream(filePath, { highWaterMark: CHUNK_SIZE })
+    let index = 0
+    for await (const chunk of stream) {
+      if (ws.readyState !== WebSocket.OPEN) break
+      sendJSON(ws, {
+        type: 'large-file-chunk',
+        path: wirePath,
+        index,
+        data: (chunk as Buffer).toString('base64')
+      })
+      index++
+    }
+  } catch {
+    // file became unreadable mid-stream — peer will time out waiting for large-file-end
+    return
+  }
+
+  sendJSON(ws, { type: 'large-file-end', path: wirePath, mtime: stat.mtimeMs })
 }
 
 async function handleMessage(
@@ -141,14 +211,10 @@ async function handleMessage(
       const existing = connectedPeers.get(peerId)
       if (existing && existing.ws !== ws) {
         if (existing.ws.readyState === WebSocket.OPEN) {
-          // Already have a healthy connection — reject this duplicate instead of
-          // closing the working one (closing it causes a disconnect → reconnect
-          // → repeated file-list exchange → sync loop)
           console.log(`[Sync] duplicate connection from ${msg.deviceName}, rejecting new socket`)
           ws.close()
           break
         }
-        // Existing connection is dead, replace it
         existing.ws.close()
       }
       const peer: ConnectedPeer = {
@@ -161,11 +227,9 @@ async function handleMessage(
       connectedPeers.set(peer.deviceId, peer)
       onHello?.(peer)
       console.log(`[Sync] peer connected: ${peer.deviceName} (${peer.address})`)
-      // Emit syncPort so the main process can persist this peer for reconnection
       const remoteSyncPort = typeof msg.syncPort === 'number' ? msg.syncPort as number : null
       syncEvents.emit('peer-connected', peer.deviceId, peer.deviceName, peer.address, remoteSyncPort)
       sendJSON(ws, { type: 'get-file-list' })
-      // Immediately share our pause state so the new peer knows whether we're active
       sendJSON(ws, { type: 'sync-state', paused: syncPaused })
       break
     }
@@ -185,7 +249,6 @@ async function handleMessage(
     case 'get-file-list': {
       if (!watchFolder || syncPaused) break
       const files = getFileList(watchFolder)
-      // Include our tombstones so the peer can apply any deletions it missed while offline
       const tombstones = Array.from(getTombstoneMap().entries()).map(([p, deletedAt]) => ({
         path: p,
         deletedAt
@@ -203,16 +266,14 @@ async function handleMessage(
 
       const myFiles = getFileList(watchFolder)
       const myFileMap = new Map(myFiles.map((f) => [f.path, f]))
-      // Work with a mutable copy so tombstone application is reflected immediately
       const myTombstoneMap = getTombstoneMap()
 
       const sender = Array.from(connectedPeers.values()).find((p) => p.ws === ws)
 
-      // 1. Apply remote tombstones: delete local files that the peer deleted more recently
+      // 1. Apply remote tombstones
       for (const rt of remoteTombstones) {
         const existingTombstone = myTombstoneMap.get(rt.path)
         if (existingTombstone !== undefined) {
-          // Already tombstoned locally — keep the newer timestamp
           if (rt.deletedAt > existingTombstone) {
             recordTombstone(rt.path, rt.deletedAt)
             myTombstoneMap.set(rt.path, rt.deletedAt)
@@ -222,13 +283,12 @@ async function handleMessage(
 
         const localFile = myFileMap.get(rt.path)
         if (localFile && rt.deletedAt > localFile.mtime) {
-          // Remote deletion is newer than our local copy — delete it
           const localRel = safeRelPath(watchFolder, rt.path)
           if (localRel) {
             const filePath = path.join(watchFolder, localRel)
             try {
               if (fs.existsSync(filePath)) {
-                markSyncWrite(filePath)
+                markSyncWrite(filePath, -1)
                 fs.unlinkSync(filePath)
                 removeEmptyParents(filePath, watchFolder)
               }
@@ -242,28 +302,27 @@ async function handleMessage(
             }
           }
         } else if (!localFile) {
-          // We don't have the file either — just persist the tombstone so future
-          // reconnects don't re-request it
           recordTombstone(rt.path, rt.deletedAt)
           myTombstoneMap.set(rt.path, rt.deletedAt)
         }
-        // If localFile exists and is newer than the tombstone, our version wins — ignore
       }
 
-      // 2. Process remote file list against our updated tombstones
+      // 2. Request files that are newer on the remote
       for (const rf of remoteFiles) {
         const tombstoneTime = myTombstoneMap.get(rf.path)
         if (tombstoneTime !== undefined && tombstoneTime > rf.mtime) {
-          // We deleted this file more recently than the remote's last modification —
-          // tell the peer to delete their copy too
           sendJSON(ws, { type: 'file-deleted', path: rf.path, deletedAt: tombstoneTime })
           continue
         }
 
         const mine = myFileMap.get(rf.path)
-        // Only request if remote is strictly newer (1 s tolerance for mtime precision)
         if (!mine || rf.mtime - mine.mtime > 1000) {
-          sendJSON(ws, { type: 'request-file', path: rf.path })
+          // Route to the appropriate request type based on file size
+          if (rf.size >= LARGE_FILE_THRESHOLD) {
+            sendJSON(ws, { type: 'request-large-file', path: rf.path })
+          } else {
+            sendJSON(ws, { type: 'request-file', path: rf.path })
+          }
         }
       }
       break
@@ -277,10 +336,15 @@ async function handleMessage(
 
       try {
         const stat = fs.statSync(filePath)
+        // Safety guard: if a peer requests a large file via the small-file path,
+        // silently redirect to chunked transfer rather than loading it into memory.
+        if (stat.size >= LARGE_FILE_THRESHOLD) {
+          streamLargeFileToPeer(ws, toWirePath(rel), watchFolder).catch(() => {})
+          break
+        }
         const data = fs.readFileSync(filePath)
         sendJSON(ws, {
           type: 'file-data',
-          // Reply with wire format (forward slashes) so any OS can receive correctly.
           path: toWirePath(rel),
           mtime: stat.mtimeMs,
           data: data.toString('base64')
@@ -291,9 +355,122 @@ async function handleMessage(
       break
     }
 
+    // ── Large-file sender side ─────────────────────────────────────────────
+    case 'request-large-file': {
+      if (!watchFolder || syncPaused) break
+      const wirePath = msg.path as string
+      streamLargeFileToPeer(ws, wirePath, watchFolder).catch(() => {})
+      break
+    }
+
+    // ── Large-file receiver side ───────────────────────────────────────────
+    case 'large-file-start': {
+      if (!watchFolder || syncPaused) break
+      const wirePath = msg.path as string
+      const rel = safeRelPath(watchFolder, wirePath)
+      if (!rel) break
+
+      const remoteMtime = msg.mtime as number
+
+      // Skip if our local copy is already up-to-date
+      try {
+        const existing = fs.statSync(path.join(watchFolder, rel))
+        if (Math.abs(existing.mtimeMs - remoteMtime) <= 2000) break
+      } catch {
+        // file doesn't exist yet — proceed
+      }
+
+      const tmpPath = tmpPathFor(watchFolder, rel)
+      try {
+        fs.mkdirSync(path.dirname(tmpPath), { recursive: true })
+        // Remove any leftover temp file from a previous interrupted transfer
+        try { fs.unlinkSync(tmpPath) } catch { /* didn't exist */ }
+      } catch {
+        break
+      }
+
+      inProgressTransfers.set(wirePath, {
+        tmpPath,
+        totalChunks: msg.totalChunks as number,
+        receivedChunks: 0,
+        mtime: remoteMtime
+      })
+      console.log(`[Sync] receiving large file: ${wirePath} (${msg.totalChunks} chunks)`)
+      break
+    }
+
+    case 'large-file-chunk': {
+      if (!watchFolder || syncPaused) break
+      const wirePath = msg.path as string
+      const transfer = inProgressTransfers.get(wirePath)
+      if (!transfer) break // no matching start — ignore stale chunks
+
+      try {
+        const buf = Buffer.from(msg.data as string, 'base64')
+        fs.appendFileSync(transfer.tmpPath, buf)
+        transfer.receivedChunks++
+      } catch {
+        // write failed — abandon this transfer
+        inProgressTransfers.delete(wirePath)
+      }
+      break
+    }
+
+    case 'large-file-end': {
+      if (!watchFolder || syncPaused) break
+      const wirePath = msg.path as string
+      const transfer = inProgressTransfers.get(wirePath)
+      if (!transfer) break
+
+      inProgressTransfers.delete(wirePath)
+
+      const rel = safeRelPath(watchFolder, wirePath)
+      if (!rel) {
+        try { fs.unlinkSync(transfer.tmpPath) } catch { /* ignore */ }
+        break
+      }
+
+      const finalPath = path.join(watchFolder, rel)
+      const remoteMtime = (msg.mtime as number | undefined) ?? transfer.mtime
+
+      try {
+        fs.mkdirSync(path.dirname(finalPath), { recursive: true })
+        fs.renameSync(transfer.tmpPath, finalPath)
+        const mtimeSec = remoteMtime / 1000
+        fs.utimesSync(finalPath, mtimeSec, mtimeSec)
+
+        let actualMtime = remoteMtime
+        try { actualMtime = fs.statSync(finalPath).mtimeMs } catch { /* ignore */ }
+        markSyncWrite(finalPath, actualMtime)
+
+        const sender = Array.from(connectedPeers.values()).find((p) => p.ws === ws)
+        addSyncEvent(wirePath, 'received', sender?.deviceId, sender?.deviceName)
+        syncEvents.emit('file-received', wirePath, sender?.deviceName)
+        console.log(`[Sync] large file complete: ${wirePath} (${transfer.receivedChunks}/${transfer.totalChunks} chunks)`)
+      } catch {
+        // rename failed — clean up temp
+        try { fs.unlinkSync(transfer.tmpPath) } catch { /* ignore */ }
+      }
+      break
+    }
+
+    // ── Small-file receiver ────────────────────────────────────────────────
     case 'file-data': {
       if (!watchFolder || syncPaused) break
       const wirePath = msg.path as string
+
+      // Clipboard file — apply to OS clipboard and skip normal file handling
+      if (wirePath === CLIPBOARD_FILENAME) {
+        try {
+          const json = Buffer.from(msg.data as string, 'base64').toString('utf-8')
+          const payload = JSON.parse(json) as Record<string, unknown>
+          syncEvents.emit('clipboard-received', payload)
+        } catch {
+          // malformed payload — ignore
+        }
+        break
+      }
+
       const rel = safeRelPath(watchFolder, wirePath)
       if (!rel) break
       const filePath = path.join(watchFolder, rel)
@@ -302,13 +479,10 @@ async function handleMessage(
       // Reject if we have a tombstone that is newer than this file version
       const tombstoneTime = getTombstoneMap().get(wirePath)
       if (tombstoneTime !== undefined && tombstoneTime > remoteMtime) {
-        // Inform the sender so they also delete their copy
         sendJSON(ws, { type: 'file-deleted', path: wirePath, deletedAt: tombstoneTime })
         break
       }
 
-      // Skip if our local copy is already up-to-date (2s tolerance covers
-      // HFS+ 1-second mtime precision and cross-platform rounding)
       try {
         const existing = fs.statSync(filePath)
         if (Math.abs(existing.mtimeMs - remoteMtime) <= 2000) break
@@ -323,9 +497,6 @@ async function handleMessage(
         const mtimeSec = remoteMtime / 1000
         fs.utimesSync(filePath, mtimeSec, mtimeSec)
 
-        // Read back actual mtime from disk — filesystem precision (e.g. HFS+
-        // rounds to 1s) means what we read back may differ from remoteMtime.
-        // markSyncWrite must use the real on-disk value so isSyncWrite matches.
         let actualMtime = remoteMtime
         try { actualMtime = fs.statSync(filePath).mtimeMs } catch { /* ignore */ }
         markSyncWrite(filePath, actualMtime)
@@ -347,7 +518,6 @@ async function handleMessage(
       if (!rel) break
       const filePath = path.join(watchFolder, rel)
 
-      // If our local file was modified after the reported deletion, our version wins
       try {
         const stat = fs.statSync(filePath)
         if (stat.mtimeMs > deletedAt) break
@@ -357,11 +527,10 @@ async function handleMessage(
 
       try {
         if (fs.existsSync(filePath)) {
-          markSyncWrite(filePath, -1) // -1 = deletion sentinel
+          markSyncWrite(filePath, -1)
           fs.unlinkSync(filePath)
           removeEmptyParents(filePath, watchFolder)
         }
-        // Persist tombstone even if file was already absent so it survives reconnects
         recordTombstone(wirePath, deletedAt)
         const sender = Array.from(connectedPeers.values()).find((p) => p.ws === ws)
         addSyncEvent(wirePath, 'deleted', sender?.deviceId, sender?.deviceName)
@@ -475,11 +644,26 @@ export function broadcastFileChange(
 ): void {
   if (syncPaused) return
   const filePath = path.join(watchFolder, relativePath)
-  // Normalize to wire format so the receiver (any OS) gets consistent forward slashes.
   const wirePath = toWirePath(relativePath)
+
   try {
-    const data = fs.readFileSync(filePath)
     const stat = fs.statSync(filePath)
+
+    // Large files use chunked streaming to avoid loading the whole file into memory
+    if (stat.size >= LARGE_FILE_THRESHOLD) {
+      const peers = Array.from(connectedPeers.values())
+      if (peers.length === 0) return
+      console.log(`[Sync] broadcasting large file: ${wirePath} (${(stat.size / 1024 / 1024).toFixed(1)} MB)`)
+      // Stream to all peers concurrently — each peer gets its own read stream
+      for (const peer of peers) {
+        streamLargeFileToPeer(peer.ws, wirePath, watchFolder).catch(() => {})
+      }
+      addSyncEvent(wirePath, 'sent')
+      syncEvents.emit('file-sent', wirePath)
+      return
+    }
+
+    const data = fs.readFileSync(filePath)
     const msg = {
       type: 'file-data',
       path: wirePath,
@@ -500,7 +684,6 @@ export function broadcastFileDeletion(relativePath: string): void {
   if (syncPaused) return
   const wirePath = toWirePath(relativePath)
   const deletedAt = Date.now()
-  // Persist tombstone before broadcasting so reconnecting peers see it in file-list
   recordTombstone(wirePath, deletedAt)
   const msg = { type: 'file-deleted', path: wirePath, deletedAt }
   for (const peer of connectedPeers.values()) {
@@ -530,7 +713,6 @@ export function stopSyncServer(): void {
 /**
  * Ask a specific peer to send us their file list so we can pull anything
  * we're missing or that's newer on their side.
- * Safe to call at any time — it's a pure pull request, no files are pushed.
  */
 export function requestSyncFromPeer(deviceId: string): void {
   const peer = connectedPeers.get(deviceId)

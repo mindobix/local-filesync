@@ -4,6 +4,7 @@ import { getSettings, getSetting, setSetting, getPeers, getSyncEvents } from './
 import { startWatcher, stopWatcher } from './watcher'
 import { startSyncServer, stopSyncServer, getConnectedPeers, connectToPeer, setSyncPaused, isSyncPaused } from './sync'
 import { startDiscovery, stopDiscovery, getKnownPeers } from './discovery'
+import { startClipboardSync, stopClipboardSync } from './clipboard'
 
 export function registerIpcHandlers(): void {
   ipcMain.handle('get-settings', () => getSettings())
@@ -20,6 +21,16 @@ export function registerIpcHandlers(): void {
           startWatcher(settings.watchFolder)
         } else {
           stopWatcher()
+        }
+      }
+
+      if ('watchFolder' in settings || 'clipboardSync' in settings) {
+        const folder = getSetting('watchFolder') ?? ''
+        const enabled = getSetting('clipboardSync') === 'true'
+        if (enabled && folder) {
+          startClipboardSync(folder)
+        } else {
+          stopClipboardSync()
         }
       }
 
