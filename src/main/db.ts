@@ -3,11 +3,17 @@ import path from 'path'
 import fs from 'fs'
 import os from 'os'
 
+interface Tombstone {
+  path: string      // wire-format (forward slashes)
+  deletedAt: number // ms timestamp
+}
+
 interface DbData {
   settings: Record<string, string>
   peers: PeerRow[]
   syncEvents: SyncEventRow[]
   nextEventId: number
+  tombstones: Tombstone[]
 }
 
 interface PeerRow {
@@ -32,16 +38,19 @@ let data: DbData = {
   settings: {},
   peers: [],
   syncEvents: [],
-  nextEventId: 1
+  nextEventId: 1,
+  tombstones: []
 }
 
 function load(): void {
   try {
     const raw = fs.readFileSync(dbPath, 'utf-8')
     data = JSON.parse(raw)
+    // Migrate: older db files won't have tombstones
+    if (!data.tombstones) data.tombstones = []
   } catch {
     // file doesn't exist yet or is corrupt — start fresh
-    data = { settings: {}, peers: [], syncEvents: [], nextEventId: 1 }
+    data = { settings: {}, peers: [], syncEvents: [], nextEventId: 1, tombstones: [] }
   }
 }
 
@@ -71,7 +80,12 @@ export function initDB(): void {
       changed = true
     }
   }
-  if (changed) save()
+
+  // Drop tombstones older than 30 days to keep the db compact
+  const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000
+  const before = data.tombstones.length
+  data.tombstones = data.tombstones.filter((t) => t.deletedAt > cutoff)
+  if (changed || data.tombstones.length !== before) save()
 }
 
 export function getSetting(key: string): string | null {
@@ -125,4 +139,23 @@ export function addSyncEvent(
 
 export function getSyncEvents(limit = 100): SyncEventRow[] {
   return data.syncEvents.slice(0, limit)
+}
+
+// Record (or update) a deletion tombstone. Uses the most-recent deletedAt if called
+// multiple times for the same path.
+export function recordTombstone(wirePath: string, deletedAt = Date.now()): void {
+  const idx = data.tombstones.findIndex((t) => t.path === wirePath)
+  if (idx >= 0) {
+    if (deletedAt > data.tombstones[idx].deletedAt) {
+      data.tombstones[idx].deletedAt = deletedAt
+    }
+  } else {
+    data.tombstones.push({ path: wirePath, deletedAt })
+  }
+  save()
+}
+
+// Returns a Map of wirePath → deletedAt for fast lookup.
+export function getTombstoneMap(): Map<string, number> {
+  return new Map(data.tombstones.map((t) => [t.path, t.deletedAt]))
 }

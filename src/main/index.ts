@@ -240,6 +240,24 @@ async function main(): Promise<void> {
       timestamp: Date.now()
     })
   })
+
+  syncEvents.on('sync-paused-changed', (paused: boolean) => {
+    notifyRenderer('sync-event', {
+      type: 'sync-paused-changed',
+      paused,
+      timestamp: Date.now()
+    })
+  })
+
+  syncEvents.on('peer-sync-state', (deviceId: string, deviceName: string, paused: boolean) => {
+    notifyRenderer('sync-event', {
+      type: 'peer-sync-state',
+      deviceId,
+      deviceName,
+      paused,
+      timestamp: Date.now()
+    })
+  })
 }
 
 app.whenReady().then(() => {

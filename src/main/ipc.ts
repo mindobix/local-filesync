@@ -2,7 +2,7 @@ import { ipcMain, dialog, BrowserWindow, app } from 'electron'
 import os from 'os'
 import { getSettings, getSetting, setSetting, getPeers, getSyncEvents } from './db'
 import { startWatcher, stopWatcher } from './watcher'
-import { startSyncServer, stopSyncServer, getConnectedPeers, connectToPeer } from './sync'
+import { startSyncServer, stopSyncServer, getConnectedPeers, connectToPeer, setSyncPaused, isSyncPaused } from './sync'
 import { startDiscovery, stopDiscovery, getKnownPeers } from './discovery'
 
 export function registerIpcHandlers(): void {
@@ -73,8 +73,14 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('get-sync-status', () => ({
     connectedPeers: getConnectedPeers(),
-    discoveredPeers: getKnownPeers()
+    discoveredPeers: getKnownPeers(),
+    syncPaused: isSyncPaused()
   }))
+
+  ipcMain.handle('set-sync-paused', (_, paused: boolean) => {
+    setSyncPaused(paused)
+    return { ok: true }
+  })
 
   ipcMain.handle('get-local-ips', () => {
     const ips: string[] = []

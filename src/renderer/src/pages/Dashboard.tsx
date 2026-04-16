@@ -6,12 +6,21 @@ interface SyncEvent {
   deviceName?: string
   peerName?: string
   deviceId?: string
+  paused?: boolean
   timestamp: number
 }
 
+interface ConnectedPeer {
+  deviceId: string
+  deviceName: string
+  address: string
+  paused: boolean
+}
+
 interface SyncStatus {
-  connectedPeers: { deviceId: string; deviceName: string; address: string }[]
+  connectedPeers: ConnectedPeer[]
   discoveredPeers: { deviceId: string; deviceName: string; lastSeen: number }[]
+  syncPaused: boolean
 }
 
 const EVENT_ICONS: Record<string, string> = {
@@ -19,7 +28,9 @@ const EVENT_ICONS: Record<string, string> = {
   'peer-disconnected': '🔌',
   'file-received': '⬇',
   'file-sent': '⬆',
-  'file-deleted': '🗑'
+  'file-deleted': '🗑',
+  'sync-paused-changed': '⏸',
+  'peer-sync-state': '⏸'
 }
 
 const EVENT_COLORS: Record<string, string> = {
@@ -27,7 +38,9 @@ const EVENT_COLORS: Record<string, string> = {
   'peer-disconnected': 'text-slate-400',
   'file-received': 'text-blue-400',
   'file-sent': 'text-purple-400',
-  'file-deleted': 'text-red-400'
+  'file-deleted': 'text-red-400',
+  'sync-paused-changed': 'text-amber-400',
+  'peer-sync-state': 'text-amber-400'
 }
 
 function formatTime(ts: number): string {
@@ -50,6 +63,12 @@ function eventLabel(ev: SyncEvent): string {
       return `Sent ${ev.filePath}`
     case 'file-deleted':
       return `Deleted ${ev.filePath}`
+    case 'sync-paused-changed':
+      return ev.paused ? 'Sync paused by you' : 'Sync resumed by you'
+    case 'peer-sync-state':
+      return ev.paused
+        ? `${ev.deviceName ?? 'Peer'} paused their sync`
+        : `${ev.deviceName ?? 'Peer'} resumed their sync`
     default:
       return ev.type
   }
@@ -59,14 +78,18 @@ export default function Dashboard() {
   const [events, setEvents] = useState<SyncEvent[]>([])
   const [status, setStatus] = useState<SyncStatus>({
     connectedPeers: [],
-    discoveredPeers: []
+    discoveredPeers: [],
+    syncPaused: false
   })
   const [watchFolder, setWatchFolder] = useState<string>('')
+  const [toggling, setToggling] = useState(false)
   const listRef = useRef<HTMLDivElement>(null)
+
+  const syncPaused = status.syncPaused
 
   useEffect(() => {
     // Load initial data
-    window.api.getSyncStatus().then(setStatus).catch(() => {})
+    window.api.getSyncStatus().then((s) => setStatus(s as SyncStatus)).catch(() => {})
     window.api.getSettings().then((s) => setWatchFolder(s.watchFolder ?? '')).catch(() => {})
     window.api.getEvents(50).then((evs) => {
       const mapped = (evs as Record<string, unknown>[]).map((e) => ({
@@ -81,15 +104,31 @@ export default function Dashboard() {
     // Subscribe to live events
     const removeSyncEvent = window.api.onSyncEvent((ev) => {
       setEvents((prev) => [...prev.slice(-199), ev])
+
+      // Keep status in sync for pause-related events without waiting for the poll
+      if (ev.type === 'sync-paused-changed') {
+        setStatus((prev) => ({ ...prev, syncPaused: ev.paused ?? false }))
+      }
+      if (ev.type === 'peer-sync-state') {
+        setStatus((prev) => ({
+          ...prev,
+          connectedPeers: prev.connectedPeers.map((p) =>
+            p.deviceId === ev.deviceId ? { ...p, paused: ev.paused ?? false } : p
+          )
+        }))
+      }
+      if (ev.type === 'peer-connected' || ev.type === 'peer-disconnected') {
+        window.api.getSyncStatus().then((s) => setStatus(s as SyncStatus)).catch(() => {})
+      }
     })
 
     const removePeerUpdate = window.api.onPeerUpdate(() => {
-      window.api.getSyncStatus().then(setStatus)
+      window.api.getSyncStatus().then((s) => setStatus(s as SyncStatus)).catch(() => {})
     })
 
     // Refresh status periodically
     const interval = setInterval(() => {
-      window.api.getSyncStatus().then(setStatus)
+      window.api.getSyncStatus().then((s) => setStatus(s as SyncStatus)).catch(() => {})
     }, 5000)
 
     return () => {
@@ -106,17 +145,33 @@ export default function Dashboard() {
     }
   }, [events])
 
+  async function handlePauseToggle() {
+    setToggling(true)
+    try {
+      await window.api.setSyncPaused(!syncPaused)
+      setStatus((prev) => ({ ...prev, syncPaused: !syncPaused }))
+    } finally {
+      setToggling(false)
+    }
+  }
+
   return (
     <div className="flex flex-col h-full p-4 gap-4">
       {/* Status strip */}
       <div className="flex gap-3">
         <div className="flex-1 bg-slate-800 rounded-lg p-3 flex items-center gap-3">
           <div
-            className={`w-2.5 h-2.5 rounded-full ${watchFolder ? 'bg-green-400' : 'bg-slate-500'}`}
+            className={`w-2.5 h-2.5 rounded-full ${
+              syncPaused
+                ? 'bg-amber-400'
+                : watchFolder
+                  ? 'bg-green-400'
+                  : 'bg-slate-500'
+            }`}
           />
           <div className="min-w-0">
             <p className="text-xs text-slate-400 uppercase tracking-wide">
-              Watching
+              {syncPaused ? 'Sync Paused' : 'Watching'}
             </p>
             <p className="text-sm font-medium truncate">
               {watchFolder || 'No folder selected'}
@@ -132,8 +187,13 @@ export default function Dashboard() {
             <p className="text-xs text-slate-400 uppercase tracking-wide">
               Connected
             </p>
-            <p className="text-sm font-medium">
+            <p className="text-sm font-medium flex items-center gap-1">
               {status.connectedPeers.length === 1 ? 'Peer' : 'Peers'}
+              {status.connectedPeers.some((p) => p.paused) && (
+                <span className="text-xs text-amber-400" title="One or more peers are paused">
+                  ⏸
+                </span>
+              )}
             </p>
           </div>
         </div>
@@ -149,7 +209,31 @@ export default function Dashboard() {
             <p className="text-sm font-medium">on LAN</p>
           </div>
         </div>
+
+        {/* Pause / Resume button */}
+        <button
+          onClick={handlePauseToggle}
+          disabled={toggling || !watchFolder}
+          title={syncPaused ? 'Resume sync' : 'Pause sync'}
+          className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+            syncPaused
+              ? 'bg-amber-500 hover:bg-amber-400 text-slate-900'
+              : 'bg-slate-700 hover:bg-slate-600 text-slate-200'
+          }`}
+        >
+          {syncPaused ? '▶ Resume' : '⏸ Pause'}
+        </button>
       </div>
+
+      {/* Paused banner */}
+      {syncPaused && (
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg px-4 py-2 text-amber-300 text-sm flex items-center gap-2">
+          <span>⏸</span>
+          <span>
+            Sync is paused — no files will be sent or received until you resume.
+          </span>
+        </div>
+      )}
 
       {/* Event log */}
       <div className="flex-1 bg-slate-800 rounded-lg flex flex-col min-h-0">

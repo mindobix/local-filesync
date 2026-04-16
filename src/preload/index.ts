@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('api', {
   connectToPeerManual: (address: string, port: number) =>
     ipcRenderer.invoke('connect-to-peer-manual', address, port),
 
+  setSyncPaused: (paused: boolean) => ipcRenderer.invoke('set-sync-paused', paused),
+
   onSyncEvent: (callback: (event: SyncEvent) => void) => {
     const listener = (_: Electron.IpcRendererEvent, event: SyncEvent) =>
       callback(event)
@@ -40,6 +42,7 @@ interface SyncEvent {
   deviceId?: string
   deviceName?: string
   peerName?: string
+  paused?: boolean
   timestamp: number
 }
 
