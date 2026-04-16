@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('api', {
   connectToPeerManual: (address: string, port: number) =>
     ipcRenderer.invoke('connect-to-peer-manual', address, port),
 
+  openWatchFolder: () => ipcRenderer.invoke('open-watch-folder'),
+
   setSyncPaused: (paused: boolean) => ipcRenderer.invoke('set-sync-paused', paused),
 
   onSyncEvent: (callback: (event: SyncEvent) => void) => {

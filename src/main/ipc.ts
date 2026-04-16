@@ -1,4 +1,4 @@
-import { ipcMain, dialog, BrowserWindow, app } from 'electron'
+import { ipcMain, dialog, BrowserWindow, app, shell } from 'electron'
 import os from 'os'
 import { getSettings, getSetting, setSetting, getPeers, getSyncEvents } from './db'
 import { startWatcher, stopWatcher } from './watcher'
@@ -109,5 +109,10 @@ export function registerIpcHandlers(): void {
     const manualId = `manual-${address}`
     connectToPeer(manualId, address, port)
     return { ok: true }
+  })
+
+  ipcMain.handle('open-watch-folder', () => {
+    const folder = getSetting('watchFolder') ?? ''
+    if (folder) shell.openPath(folder)
   })
 }

@@ -26,6 +26,10 @@ interface Window {
       connectedPeers: { deviceId: string; deviceName: string; address: string }[]
       discoveredPeers: PeerInfoPayload[]
     }>
+    getLocalIps: () => Promise<string[]>
+    connectToPeerManual: (address: string, port: number) => Promise<{ ok: boolean }>
+    setSyncPaused: (paused: boolean) => Promise<{ ok: boolean }>
+    openWatchFolder: () => Promise<void>
     onSyncEvent: (callback: (event: SyncEventPayload) => void) => () => void
     onPeerUpdate: (callback: (peer: PeerInfoPayload) => void) => () => void
   }
