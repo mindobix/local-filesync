@@ -17,6 +17,20 @@ const LARGE_FILE_THRESHOLD = 100 * 1024 * 1024 // 100 MB
 /** Chunk size for large-file streaming (2 MB keeps memory bounded on both ends). */
 const CHUNK_SIZE = 2 * 1024 * 1024 // 2 MB
 
+/** Normalize socket addresses for storage and URL use. Dual-stack sockets on
+ *  macOS 15 hand back IPv4-mapped IPv6 ("::ffff:192.168.1.2") which is not a
+ *  valid WebSocket URL host without brackets — strip the mapping to recover
+ *  plain IPv4. */
+function normalizeAddress(addr: string): string {
+  if (addr.startsWith('::ffff:')) return addr.slice(7)
+  return addr
+}
+
+/** Build a WebSocket URL host portion, bracketing raw IPv6 as required by RFC 3986. */
+function hostForUrl(addr: string): string {
+  return addr.includes(':') ? `[${addr}]` : addr
+}
+
 interface ConnectedPeer {
   ws: WebSocket
   deviceId: string
@@ -551,7 +565,7 @@ export function startSyncServer(port: number): void {
   })
 
   wss.on('connection', (ws, req) => {
-    const address = req.socket.remoteAddress ?? 'unknown'
+    const address = normalizeAddress(req.socket.remoteAddress ?? 'unknown')
     let peer: ConnectedPeer | null = null
     console.log(`[Sync] inbound connection from ${address}`)
 
@@ -600,9 +614,10 @@ export function connectToPeer(
 ): void {
   if (connectedPeers.has(deviceId) || connectingPeers.has(deviceId)) return
 
+  address = normalizeAddress(address)
   connectingPeers.add(deviceId)
   console.log(`[Sync] connecting to ${address}:${port}`)
-  const ws = new WebSocket(`ws://${address}:${port}`)
+  const ws = new WebSocket(`ws://${hostForUrl(address)}:${port}`)
 
   ws.on('open', () => {
     connectingPeers.delete(deviceId)
